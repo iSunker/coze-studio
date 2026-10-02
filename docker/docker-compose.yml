@@ -152,6 +152,13 @@ services:
         chown -R elasticsearch:elasticsearch /bitnami/elasticsearch/data
         chmod g+s /bitnami/elasticsearch/data
 
+        # Bitnami ES 8.18.0 writes its data dir under /opt/bitnami/elasticsearch/data
+        # (not the mounted /bitnami/elasticsearch/data), so it must exist and be
+        # owned by the elasticsearch user, otherwise ES fails with AccessDeniedException.
+        mkdir -p /opt/bitnami/elasticsearch/data
+        chown -R elasticsearch:elasticsearch /opt/bitnami/elasticsearch/data
+        chmod 775 /opt/bitnami/elasticsearch/data
+
         # Create plugin directory
         mkdir -p /bitnami/elasticsearch/plugins;
 
@@ -201,7 +208,7 @@ services:
       "
 
   minio:
-    image: minio/minio:RELEASE.2025-06-13T11-33-47Z-cpuv1
+    image: bitnamilegacy/minio:latest
     container_name: coze-minio
     user: root
     privileged: true
@@ -219,21 +226,21 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
       MINIO_DEFAULT_BUCKETS: ${STORAGE_BUCKET:-opencoze},${MINIO_DEFAULT_BUCKETS:-milvus}
     entrypoint:
-      - /bin/sh
+      - /bin/bash
       - -c
       - |
         # Run initialization in background
         (
           # Wait for MinIO to be ready
-          until (/usr/bin/mc alias set localminio http://localhost:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}) do
+          until (mc alias set localminio http://localhost:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}) do
             echo "Waiting for MinIO to be ready..."
             sleep 1
           done
 
           # Create bucket and copy files
-          /usr/bin/mc mb --ignore-existing localminio/$${STORAGE_BUCKET}
-          /usr/bin/mc cp --recursive /default_icon/ localminio/$${STORAGE_BUCKET}/default_icon/
-          /usr/bin/mc cp --recursive /official_plugin_icon/ localminio/$${STORAGE_BUCKET}/official_plugin_icon/
+          mc mb --ignore-existing localminio/$${STORAGE_BUCKET}
+          mc cp --recursive /default_icon/ localminio/$${STORAGE_BUCKET}/default_icon/
+          mc cp --recursive /official_plugin_icon/ localminio/$${STORAGE_BUCKET}/official_plugin_icon/
 
           echo "MinIO initialization complete."
         ) &
@@ -244,7 +251,7 @@ services:
       test:
         [
           'CMD-SHELL',
-          '/usr/bin/mc alias set health_check http://localhost:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} && /usr/bin/mc ready health_check',
+          'mc alias set health_check http://localhost:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} && mc ready health_check',
         ]
       interval: 30s
       timeout: 10s
@@ -412,7 +419,28 @@ services:
         condition: service_healthy
       milvus:
         condition: service_healthy
-    command: ['/app/opencoze']
+    # `depends_on: condition: service_healthy` is only honored by `compose up`.
+    # On a Docker daemon restart containers are relaunched without re-evaluating
+    # those health conditions, so coze-server could start before MySQL/Redis are
+    # ready, panic in application.Init, and (with restart: always) flap. Wait for
+    # the critical backends here so a daemon restart always self-heals.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        wait_for() {
+          addr="$$1"; host="$${addr%%:*}"; port="$${addr##*:}";
+          echo "coze-server: waiting for $$host:$$port ...";
+          until nc -w 2 "$$host" "$$port" </dev/null >/dev/null 2>&1; do
+            sleep 2;
+          done;
+          echo "coze-server: $$host:$$port is reachable";
+        }
+        wait_for "$${MYSQL_HOST:-mysql}:$${MYSQL_PORT:-3306}"
+        wait_for "$${REDIS_ADDR:-redis:6379}"
+
+        echo "coze-server: dependencies ready, starting opencoze"
+        exec /app/opencoze
 
   coze-web:
     # build:
