@@ -192,14 +192,23 @@ services:
           done
           echo 'Elasticsearch is ready!'
 
-          # Run ES initialization script
+          # Run ES initialization script.
+          # NOTE: setup_es.sh is checked out with CRLF line endings, so its
+          # shebang ends with a carriage return and the generated script fails
+          # with 'cannot execute: required file not found'. Strip CRs with tr.
           echo 'Running Elasticsearch initialization...'
-          sed 's/\r$$//' /setup_es.sh > /setup_es_fixed.sh
+          tr -d '\\r' < /setup_es.sh > /setup_es_fixed.sh
           chmod +x /setup_es_fixed.sh
-          /setup_es_fixed.sh --index-dir /es_index_schema
-          # Create marker file indicating initialization completion
-          touch /tmp/es_init_complete
-          echo 'Elasticsearch initialization completed successfully!'
+          # Fail loudly: only mark init complete if the schema loader actually
+          # succeeds, otherwise the healthcheck would pass with no indices and
+          # every search request would 500 with index_not_found_exception.
+          if /setup_es_fixed.sh --index-dir /es_index_schema; then
+            touch /tmp/es_init_complete
+            echo 'Elasticsearch initialization completed successfully!'
+          else
+            echo 'ERROR: Elasticsearch initialization failed' >&2
+            exit 1
+          fi
         ) &
 
         # Start Elasticsearch
