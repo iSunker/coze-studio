@@ -60,3 +60,6 @@ values-dev.yaml
 
 *.tsbuildinfo
 .trae/*
+
+# Local DB backups (may contain user data / secrets) — never commit
+backups/
